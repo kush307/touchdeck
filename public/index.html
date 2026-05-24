@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>Mac Remote</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --panel: #17171b;
+    --panel-2: #1f1f25;
+    --line: #2a2a31;
+    --text: #e8e8ec;
+    --muted: #8a8a93;
+    --accent: #3b82f6;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 15px -apple-system, system-ui, sans-serif;
+    overscroll-behavior: none;
+    touch-action: none;
+    user-select: none; -webkit-user-select: none;
+  }
+  body {
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    gap: 10px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px 0;
+  }
+  .status {
+    font-size: 13px; color: var(--muted);
+  }
+  .status.ok { color: #34d399; }
+  .status.bad { color: #f87171; }
+  #pad {
+    flex: 1;
+    margin: 0 10px;
+    background: var(--panel);
+    border-radius: 18px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    position: relative;
+    overflow: hidden;
+  }
+  #pad .hint {
+    pointer-events: none;
+    text-align: center; line-height: 1.5;
+  }
+  .row {
+    display: flex; gap: 8px; padding: 0 10px;
+  }
+  button.btn, .keybtn {
+    flex: 1;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 10px;
+    font-size: 15px;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  button.btn:active, .keybtn:active { background: #2c2c34; }
+  .scrollbar {
+    width: 56px;
+    margin: 0 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+  }
+  .padwrap { display: flex; flex: 1; }
+  #typebar {
+    display: flex; gap: 8px; padding: 0 10px 10px;
+    align-items: center;
+  }
+  #typeinput {
+    flex: 1;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 16px; /* >=16 keeps iOS from zooming */
+    outline: none;
+  }
+  #typeinput:focus { border-color: var(--accent); }
+  .keys {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 6px; padding: 0 10px;
+  }
+  .keys .keybtn { padding: 10px 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+  <header>
+    <strong>Mac Remote</strong>
+    <span id="status" class="status">connecting…</span>
+  </header>
+
+  <div class="padwrap">
+    <div id="pad">
+      <div class="hint">drag to move<br/>tap = click · two-finger tap = right-click<br/>double-tap drag = drag-select</div>
+    </div>
+    <div class="scrollbar" id="scrollbar"></div>
+  </div>
+
+  <div class="row">
+    <button class="btn" id="leftclick">Click</button>
+    <button class="btn" id="rightclick">Right</button>
+    <button class="btn" id="dblclick">Double</button>
+  </div>
+
+  <div class="keys">
+    <button class="keybtn" data-key="Escape">esc</button>
+    <button class="keybtn" data-key="Tab">tab</button>
+    <button class="keybtn" data-key="ArrowUp">↑</button>
+    <button class="keybtn" data-key="ArrowDown">↓</button>
+    <button class="keybtn" data-key="ArrowLeft">←</button>
+    <button class="keybtn" data-key="ArrowRight">→</button>
+  </div>
+
+  <div id="typebar">
+    <input id="typeinput" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="type here, sent live to Mac" />
+    <button class="btn" id="enterbtn" style="flex:0 0 80px">⏎</button>
+    <button class="btn" id="bsbtn" style="flex:0 0 80px">⌫</button>
+  </div>
+
+<script>
+(() => {
+  const statusEl = document.getElementById("status");
+  let ws;
+  let queue = [];
+
+  function connect() {
+    const url = `ws://${location.host}`;
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      statusEl.textContent = "connected";
+      statusEl.className = "status ok";
+      queue.forEach((m) => ws.send(m));
+      queue = [];
+    };
+    ws.onclose = () => {
+      statusEl.textContent = "disconnected — retrying";
+      statusEl.className = "status bad";
+      setTimeout(connect, 800);
+    };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+
+  function send(obj) {
+    const data = JSON.stringify(obj);
+    if (ws && ws.readyState === 1) ws.send(data);
+    else queue.push(data);
+  }
+
+  // ---------- trackpad ----------
+  const pad = document.getElementById("pad");
+  const SENS = 1.8;     // base sensitivity
+  const ACCEL = 0.015;  // acceleration factor on fast moves
+
+  // Throttle: accumulate move deltas between animation frames
+  let moveDx = 0, moveDy = 0, moveRaf = 0;
+
+  // Track each active touch by identifier.
+  const touches = new Map();
+  let movedSignificantly = false;
+  let touchStartTime = 0;
+  let lastTapTime = 0;
+  let dragMode = false; // double-tap-drag selection
+
+  function accelerate(d) {
+    // soft-quadratic: sign * (|d| + ACCEL*d^2)
+    const a = Math.abs(d);
+    return Math.sign(d) * (a + ACCEL * a * a);
+  }
+
+  pad.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    }
+    if (touches.size === 1) {
+      touchStartTime = Date.now();
+      movedSignificantly = false;
+      // double-tap-drag detection
+      if (Date.now() - lastTapTime < 280) {
+        dragMode = true;
+        // simulate mouse-down by using cliclick "dd" via a "drag" message? we'll fake with click+hold
+        // simpler: just send a click; macOS treats next move as selection if mouse is held — but we can't hold.
+        // Workaround: send a doubleclick before drag so word/region selects, then move extends selection.
+        send({ type: "doubleclick" });
+      }
+    }
+  }, { passive: false });
+
+  pad.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (touches.size === 1) {
+      const t = e.changedTouches[0];
+      const prev = touches.get(t.identifier);
+      if (!prev) return;
+      const dx = (t.clientX - prev.x) * SENS;
+      const dy = (t.clientY - prev.y) * SENS;
+      touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+      if (Math.abs(dx) + Math.abs(dy) > 1.5) movedSignificantly = true;
+      moveDx += accelerate(dx);
+      moveDy += accelerate(dy);
+      if (!moveRaf) {
+        moveRaf = requestAnimationFrame(() => {
+          send({ type: "move", dx: moveDx, dy: moveDy });
+          moveDx = 0; moveDy = 0; moveRaf = 0;
+        });
+      }
+    } else if (touches.size === 2) {
+      // two-finger scroll: average dy
+      const arr = [...e.touches];
+      let dy = 0, dx = 0, n = 0;
+      for (const t of arr) {
+        const prev = touches.get(t.identifier);
+        if (!prev) continue;
+        dy += (t.clientY - prev.y);
+        dx += (t.clientX - prev.x);
+        touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+        n++;
+      }
+      if (n) send({ type: "scroll", dx: dx / n, dy: dy / n });
+    }
+  }, { passive: false });
+
+  pad.addEventListener("touchend", (e) => {
+    e.preventDefault();
+    const wasFingers = touches.size;
+    for (const t of e.changedTouches) touches.delete(t.identifier);
+    if (touches.size === 0) {
+      const dt = Date.now() - touchStartTime;
+      if (!movedSignificantly && dt < 250) {
+        if (wasFingers === 2) {
+          send({ type: "click", button: "right" });
+        } else {
+          send({ type: "click", button: "left" });
+          lastTapTime = Date.now();
+        }
+      }
+      dragMode = false;
+    }
+  }, { passive: false });
+
+  // ---------- side scroll bar ----------
+  const sb = document.getElementById("scrollbar");
+  let sbLast = null;
+  sb.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    sbLast = e.touches[0].clientY;
+  }, { passive: false });
+  sb.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    const y = e.touches[0].clientY;
+    if (sbLast !== null) send({ type: "scroll", dy: y - sbLast });
+    sbLast = y;
+  }, { passive: false });
+  sb.addEventListener("touchend", () => { sbLast = null; });
+
+  // ---------- buttons ----------
+  document.getElementById("leftclick").addEventListener("click", () => send({ type: "click", button: "left" }));
+  document.getElementById("rightclick").addEventListener("click", () => send({ type: "click", button: "right" }));
+  document.getElementById("dblclick").addEventListener("click", () => send({ type: "doubleclick" }));
+
+  for (const b of document.querySelectorAll(".keybtn[data-key]")) {
+    b.addEventListener("click", () => send({ type: "key", name: b.dataset.key }));
+  }
+
+  // ---------- text entry ----------
+  const input = document.getElementById("typeinput");
+  let lastValue = "";
+  input.addEventListener("input", () => {
+    const v = input.value;
+    // diff against lastValue: send the newly appended chars, or backspaces if shorter.
+    if (v.length > lastValue.length && v.startsWith(lastValue)) {
+      send({ type: "text", value: v.slice(lastValue.length) });
+    } else if (v.length < lastValue.length && lastValue.startsWith(v)) {
+      const n = lastValue.length - v.length;
+      for (let i = 0; i < n; i++) send({ type: "key", name: "Backspace" });
+    } else {
+      // fallback: clear and resend (rare)
+      // (don't try to be clever; just send the new tail)
+      send({ type: "text", value: v });
+    }
+    lastValue = v;
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      send({ type: "key", name: "Enter" });
+      input.value = ""; lastValue = "";
+    }
+  });
+  document.getElementById("enterbtn").addEventListener("click", () => {
+    send({ type: "key", name: "Enter" });
+    input.value = ""; lastValue = "";
+  });
+  document.getElementById("bsbtn").addEventListener("click", () => {
+    send({ type: "key", name: "Backspace" });
+    // also remove from local mirror
+    if (lastValue.length) {
+      lastValue = lastValue.slice(0, -1);
+      input.value = lastValue;
+    }
+  });
+})();
+</script>
+</body>
+</html>
