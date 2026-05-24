@@ -15,6 +15,10 @@ A lightweight web app that runs on your Mac and serves a touch-friendly control 
 - **Low Latency** — native Core Graphics helper for smooth cursor movement (no process spawn per move)
 - **Screen Centering** — cursor automatically moves to screen center when air mouse activates
 
+## How It Works
+
+TouchDeck communicates over your local Wi-Fi network — no Bluetooth required. The Mac runs a web server that your iPhone connects to via Safari using HTTP/HTTPS and WebSocket. Both devices must be on the same Wi-Fi network.
+
 ## Requirements
 
 - macOS
