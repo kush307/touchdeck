@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<title>Mac Remote</title>
+<title>TouchDeck</title>
 <style>
   :root {
     --bg: #0b0b0d;
@@ -68,6 +68,7 @@
     appearance: none;
   }
   button.btn:active, .keybtn:active { background: #2c2c34; }
+  button.btn.active { background: var(--accent); border-color: var(--accent); }
   .scrollbar {
     width: 56px;
     margin: 0 10px;
@@ -101,13 +102,13 @@
 </head>
 <body>
   <header>
-    <strong>Mac Remote</strong>
+    <strong>TouchDeck</strong>
     <span id="status" class="status">connecting…</span>
   </header>
 
   <div class="padwrap">
     <div id="pad">
-      <div class="hint">drag to move<br/>tap = click · two-finger tap = right-click<br/>double-tap drag = drag-select</div>
+      <div class="hint" id="padhint">drag to move<br/>tap = click · two-finger tap = right-click<br/>double-tap drag = drag-select</div>
     </div>
     <div class="scrollbar" id="scrollbar"></div>
   </div>
@@ -116,6 +117,7 @@
     <button class="btn" id="leftclick">Click</button>
     <button class="btn" id="rightclick">Right</button>
     <button class="btn" id="dblclick">Double</button>
+    <button class="btn" id="airmouse">Air</button>
   </div>
 
   <div class="keys">
@@ -140,13 +142,20 @@
   let queue = [];
 
   function connect() {
-    const url = `ws://${location.host}`;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}`;
     ws = new WebSocket(url);
     ws.onopen = () => {
       statusEl.textContent = "connected";
       statusEl.className = "status ok";
       queue.forEach((m) => ws.send(m));
       queue = [];
+    };
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "screen") { screenW = msg.w; screenH = msg.h; }
+      } catch {}
     };
     ws.onclose = () => {
       statusEl.textContent = "disconnected — retrying";
@@ -156,6 +165,8 @@
     ws.onerror = () => ws.close();
   }
   connect();
+
+  let screenW = 1920, screenH = 1080;
 
   function send(obj) {
     const data = JSON.stringify(obj);
@@ -310,12 +321,83 @@
   });
   document.getElementById("bsbtn").addEventListener("click", () => {
     send({ type: "key", name: "Backspace" });
-    // also remove from local mirror
     if (lastValue.length) {
       lastValue = lastValue.slice(0, -1);
       input.value = lastValue;
     }
   });
+
+  // ---------- air mouse (gyroscope) ----------
+  const airBtn = document.getElementById("airmouse");
+  const padHint = document.getElementById("padhint");
+  let airActive = false;
+  let airLoop = 0;
+
+  // Integrate gyro rotation rate into an angle offset, then map angle to cursor.
+  // This makes it feel like pointing — tilt phone right, cursor goes right.
+  let angleX = 0, angleY = 0;
+  let curX = 0, curY = 0;
+  let lastAirTime = 0;
+
+  const AIR_SCALE = 40;
+
+  function onGyro(e) {
+    const rr = e.rotationRate;
+    if (!rr) return;
+    const now = performance.now();
+    const dt = lastAirTime ? Math.min((now - lastAirTime) / 1000, 0.05) : 0.016;
+    lastAirTime = now;
+    angleX += (rr.beta || 0) * dt;
+    angleY += (rr.alpha || 0) * dt;
+  }
+
+  function airTick() {
+    const targetX = angleX * AIR_SCALE;
+    const targetY = -angleY * AIR_SCALE;
+    const dx = targetX - curX;
+    const dy = targetY - curY;
+    curX = targetX;
+    curY = targetY;
+    if (Math.abs(dx) > 0.05 || Math.abs(dy) > 0.05) {
+      send({ type: "move", dx, dy });
+    }
+    if (airActive) airLoop = requestAnimationFrame(airTick);
+  }
+
+  async function toggleAir() {
+    if (airActive) {
+      window.removeEventListener("devicemotion", onGyro);
+      airActive = false;
+      airBtn.classList.remove("active");
+      cancelAnimationFrame(airLoop);
+      angleX = 0; angleY = 0; curX = 0; curY = 0; lastAirTime = 0;
+      padHint.innerHTML = "drag to move<br/>tap = click · two-finger tap = right-click<br/>double-tap drag = drag-select";
+      return;
+    }
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      try {
+        const perm = await DeviceMotionEvent.requestPermission();
+        padHint.innerHTML = "permission: " + perm;
+        if (perm !== "granted") {
+          padHint.innerHTML = "motion permission denied<br/>check Settings → Safari → Motion & Orientation";
+          return;
+        }
+      } catch (err) {
+        padHint.innerHTML = "permission error: " + err.message;
+        return;
+      }
+    } else {
+      padHint.innerHTML = "no requestPermission — listening directly";
+    }
+    send({ type: "moveto", x: Math.round(screenW / 2), y: Math.round(screenH / 2) });
+    window.addEventListener("devicemotion", onGyro);
+    airActive = true;
+    airBtn.classList.add("active");
+    airLoop = requestAnimationFrame(airTick);
+    padHint.innerHTML = "air mouse active<br/>tilt to move · tap pad to click";
+  }
+
+  airBtn.addEventListener("click", toggleAir);
 })();
 </script>
 </body>

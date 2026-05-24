@@ -11,18 +11,38 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 8765;
+const HTTPS_PORT = 8766;
 
 const app = express();
 app.use(express.static(path.join(__dirname, "public")));
 
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+
+let httpsServer;
+try {
+  const opts = {
+    key: readFileSync(path.join(__dirname, "key.pem")),
+    cert: readFileSync(path.join(__dirname, "cert.pem")),
+  };
+  httpsServer = createHttpsServer(opts, app);
+} catch {}
+const wss = new WebSocketServer({ noServer: true });
+
+function handleUpgrade(srv) {
+  srv.on("upgrade", (req, socket, head) => {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
+}
+handleUpgrade(server);
+if (httpsServer) handleUpgrade(httpsServer);
 
 // ---------- input helpers ----------
 
@@ -39,8 +59,27 @@ function run(cmd, args) {
 const mouseProc = spawn(path.join(__dirname, "mousemove"), [], { stdio: ["pipe", "pipe", "inherit"] });
 mouseProc.on("exit", () => console.error("mousemove helper exited"));
 
+let screenW = 1920, screenH = 1080;
+let lineBuffer = "";
+mouseProc.stdout.on("data", (chunk) => {
+  lineBuffer += chunk.toString();
+  let nl;
+  while ((nl = lineBuffer.indexOf("\n")) !== -1) {
+    const line = lineBuffer.slice(0, nl);
+    lineBuffer = lineBuffer.slice(nl + 1);
+    const m = line.match(/^s (\d+) (\d+)$/);
+    if (m) { screenW = +m[1]; screenH = +m[2]; }
+  }
+});
+mouseProc.stdin.write("s\n");
+
 function moveRelative(dx, dy) {
   mouseProc.stdin.write(`m ${dx} ${dy}\n`);
+  return Promise.resolve();
+}
+
+function moveAbsolute(x, y) {
+  mouseProc.stdin.write(`a ${x} ${y}\n`);
   return Promise.resolve();
 }
 
@@ -124,6 +163,7 @@ function pressKey(name, modifiers = []) {
 
 wss.on("connection", (ws) => {
   console.log("client connected");
+  ws.send(JSON.stringify({ type: "screen", w: screenW, h: screenH }));
 
   ws.on("message", async (raw) => {
     let msg;
@@ -135,6 +175,9 @@ wss.on("connection", (ws) => {
     switch (msg.type) {
       case "move":
         moveRelative(msg.dx, msg.dy);
+        break;
+      case "moveto":
+        moveAbsolute(msg.x, msg.y);
         break;
       case "click":
         await click(msg.button || "left");
@@ -168,8 +211,15 @@ function localIPs() {
 }
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("\niPhone Remote listening on:");
-  for (const ip of localIPs()) console.log(`  http://${ip}:${PORT}`);
-  console.log(`  http://localhost:${PORT}\n`);
-  console.log("Open the http://<your-mac-ip>:8765 URL in Safari on your iPhone.");
+  const ips = localIPs();
+  console.log("\nTouchDeck listening on:");
+  for (const ip of ips) console.log(`  http://${ip}:${PORT}`);
+  console.log(`  http://localhost:${PORT}`);
+  if (httpsServer) {
+    httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
+      console.log("\nFor Air Mouse (requires HTTPS):");
+      for (const ip of ips) console.log(`  https://${ip}:${HTTPS_PORT}`);
+      console.log(`\nUse the HTTPS URL on your iPhone for air mouse support.`);
+    });
+  }
 });
